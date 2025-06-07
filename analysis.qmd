@@ -1,0 +1,334 @@
+---
+title: "Analysis"
+date: 2024-10-12
+format: pdf
+editor: visual
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(readxl)     
+library(dplyr)      
+library(glmmTMB)    
+library(caret)      
+library(ggplot2)    
+library(naniar)
+library(AER)
+library(performance)
+library(MASS)
+library(glmnet)
+library(plotmo)
+```
+
+# Cleaning data
+
+I chose here to omit the missing values, since $99.6%$ of them is present should be acceptable. I assume the missingness is due to MCAR.
+
+```{r}
+data0 <- read_excel("ElSA Dataset 04 24.xlsx", sheet = "Datensatz 260324")
+
+missing_data <- colSums(is.na(data0)) / nrow(data0)
+print(missing_data)
+vis_miss(data0)  # missing data pattern plot
+data <- na.omit(data0)
+```
+
+```{r}
+# Count the number of observations for each patient (GABiID)
+observations_per_patient <- data %>%
+  group_by(GABiID) %>%
+  summarise(num_observations = n())
+
+print(observations_per_patient)
+
+```
+
+```{r}
+# Rebin
+data$AIDAI_rebinned <- cut(data$AIDAI, 
+                           breaks = c(-Inf, 0, 2, Inf), 
+                           labels = c("0", "1-2", "3+"), 
+                           right = TRUE)
+
+data$AIDAIsys_rebinned <- cut(data$AIDAIsys, 
+                              breaks = c(-Inf, 0, 2, Inf), 
+                              labels = c("0", "1-2", "3+"), 
+                              right = TRUE)
+
+
+# Convert categorical variables to factors 
+data$Gender <- as.factor(data$Gender)
+data$AIDAI <- as.factor(data$AIDAI)
+data$AIDAIsys <- as.factor(data$AIDAIsys)
+data$GABiID <- as.factor(data$GABiID)
+
+# Otherwise numeric
+data$AgeDiag <- as.numeric(data$AgeDiag) # age diagnosed
+data$AgeSample <- as.numeric(data$AgeSample) # time of sample
+data$VASphys <- as.numeric(data$VASphys) # 
+data$VASpat <- as.numeric(data$VASpat)
+data$JLM <- as.numeric(data$JLM)
+data$CHAQ <- as.numeric(data$CHAQ)
+data$JADAS27jc <- as.numeric(data$JADAS27jc)
+data$CRP <- as.numeric(data$CRP)
+data$BSGcalc <- as.numeric(data$BSGcalc)
+data$Ferritin <- as.numeric(data$Ferritin)
+data$`Gesamt-Eiweiß (g/dl)` <- as.numeric(data$`Gesamt-Eiweiß (g/dl)`)
+data$`a2-Globulin (%)` <- as.numeric(data$`a2-Globulin (%)`)
+data$CA2F <- as.numeric(data$CA2F)
+data$Haptoglobin <- as.numeric(data$Haptoglobin)
+```
+
+```{r}
+data$TAJC_binned <- cut(
+  data$TAJC,
+  breaks = c(-1, 1, 5, 15, 43),  # Adjust bins as needed
+  labels = c("Low (0-1)", "Moderate (2-5)", "High (6-15)", "Very High (16-43)")
+)
+
+# Check the distribution of the new bins
+table(data$TAJC_binned)
+```
+
+# Sparsity
+
+```{r}
+check_sparsity_table <- function(data) {
+  
+  # Initialize empty data frame
+  sparsity_table <- data.frame(
+    Variable = character(),
+    Level = character(),
+    Frequency = integer(),
+    Proportion = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Frequency and proportion for each level of TAJC
+  TAJC_freq <- table(data$TAJC)
+  TAJC_prop <- prop.table(TAJC_freq)
+  TAJC_df <- data.frame(
+    Variable = "TAJC",
+    Level = names(TAJC_freq),
+    Frequency = as.integer(TAJC_freq),
+    Proportion = round(as.numeric(TAJC_prop), 3)
+  )
+  sparsity_table <- rbind(sparsity_table, TAJC_df)
+  
+  categorical_vars <- data %>% select_if(is.factor)
+  
+  for (var_name in names(categorical_vars)) {
+    # Frequency and proportion for each level of the categorical variable
+    freq_table <- table(categorical_vars[[var_name]])
+    prop_table <- prop.table(freq_table)
+    
+    # Combine results into a data frame
+    temp_df <- data.frame(
+      Variable = var_name,
+      Level = names(freq_table),
+      Frequency = as.integer(freq_table),
+      Proportion = round(as.numeric(prop_table), 3)
+    )
+    
+    # Append to sparsity_table
+    sparsity_table <- rbind(sparsity_table, temp_df)
+  }
+  
+  return(sparsity_table)
+}
+
+
+sparsity_table <- check_sparsity_table(data)
+print(sparsity_table)
+
+```
+
+```{r}
+ggplot(sparsity_table, aes(x = Level, y = Frequency, fill = Variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Variable, scales = "free_x") +
+  labs(title = "Frequency Distribution of Categorical Variables",
+       x = "Levels",
+       y = "Frequency") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# Model assumption checking
+
+```{r}
+# Initial model with all predictors
+mod_full <- glmmTMB(TAJC ~ Gender + AgeDiag + AgeSample + VASphys + VASpat 
+                    + JLM + CHAQ + JADAS27jc + CRP + BSGcalc + Woo + AIDAI 
+                    + Ferritin + `Gesamt-Eiweiß (g/dl)` + `a2-Globulin (%)` 
+                    + CA2F + Haptoglobin + (1 | GABiID),
+                    family = poisson, data = data)
+
+summary(mod_full)
+```
+
+## Overdispersion
+
+```{r}
+check_overdispersion(mod_full) 
+```
+
+Attempt at implementing a test for overdispersion.
+
+```{r}
+# pearson chi-squared calculation
+pearson_resid <- residuals(mod_full, type = "pearson")
+Pearson_chisq <- sum(pearson_resid^2, na.rm = TRUE)
+
+# df calculation
+n_obs <- nrow(data) 
+n_fixed <- length(fixef(mod_full)$cond)
+n_random <- length(ranef(mod_full)$GABiID[[1]])
+residual_df <- n_obs - (n_fixed + n_random)
+
+# dispersion ratio and chi sqaured test 
+dispersion_ratio <- Pearson_chisq / residual_df
+p_value <- pchisq(Pearson_chisq, df = residual_df, lower.tail = FALSE)
+
+cat("dispersion ratio = ", dispersion_ratio, "\n")
+cat("Pearson's Chi-squared = ", Pearson_chisq, "\n")
+cat("Residual Degrees of Freedom =", residual_df, "\n")
+cat("p-value=", p_value, "\n")
+```
+
+Dispersion ratio is calculated as $$\text{dispersion ratio} = \frac{\text{observed variance}}{\text{expected variance underpoisson}} = \frac{\text{observed variance}}{\mu}$$ under poisson model. If dispersion ratio $> 1$, it suggests overdispersion. From both check_dispersion function and implementation, no overdispersion is detected. Overdispersion ratio is close to one, hence we will proceed with a Poisson model.
+
+# Feature selection
+
+```{r}
+# Define the null model (with intercept only)
+null_model <- glm(TAJC ~ 1, data = data, family = poisson)
+
+# Define the full model (with all predictors)
+full_model <- glm(TAJC ~ Gender + AgeDiag + AgeSample + VASphys + VASpat + JLM + CHAQ + 
+                  JADAS27jc + CRP + BSGcalc + Woo + AIDAI + AIDAIsys + Ferritin + 
+                  `Gesamt-Eiweiß (g/dl)` + `a2-Globulin (%)` + CA2F + Haptoglobin, 
+                  data = data, family = poisson)
+
+# Perform stepwise selection
+stepwise_model <- stepAIC(null_model, scope = list(lower = null_model, upper = full_model), 
+                          direction = "both")
+
+# View the selected model
+summary(stepwise_model)
+```
+
+# Model fitting
+
+## Forcing haptoglobin
+
+```{r}
+# Negbinom mixed-effects model
+mod_negbinom <- glmmTMB(
+  TAJC ~ CRP + Haptoglobin + BSGcalc + Ferritin + CRP * Haptoglobin + CRP*BSGcalc + Haptoglobin*BSGcalc + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(mod_negbinom)
+
+```
+
+```{r}
+#mod_final_zip <- glmmTMB(
+#  TAJC ~ `Gesamt-Eiweiß (g/dl)` + VASpat + +VASphys + JLM + (1 | GABiID),
+#  ziformula =  ~ Haptoglobin + CRP,
+#  family = poisson(link = "log"),
+#  data = data,
+#  control = glmmTMBControl(optimizer = optim, optArgs = list(method = "BFGS"))
+#)
+
+#AIC(mod_final, mod_final_zip)
+#anova(mod_final, mod_final_zip, test = "LRT")
+
+#summary(mod_final_zip)
+```
+
+```{r}
+# Load necessary library
+library(ggplot2)
+
+# Scatter plot of CRP and TAJC
+ggplot(data, aes(x = CRP, y = TAJC)) +
+  geom_point(color = "blue", alpha = 0.7, size = 3) +  # Scatter points
+  geom_smooth(method = "lm", color = "red", se = TRUE) +  # Add linear regression line
+  labs(
+    title = "Scatter Plot of CRP vs Total Active Joint Count (TAJC)",
+    x = "CRP",
+    y = "Total Active Joint Count (TAJC)"
+  ) +
+  theme_minimal()
+
+
+
+# Scatter plot of Haptoglobin and TAJC
+ggplot(data, aes(x = Haptoglobin, y = TAJC)) +
+  geom_point(color = "green", alpha = 0.7, size = 3) +  # Scatter points
+  geom_smooth(method = "lm", color = "red", se = TRUE) +  # Add linear regression line
+  labs(
+    title = "Scatter Plot of Haptoglobin vs Total Active Joint Count (TAJC)",
+    x = "Haptoglobin",
+    y = "Total Active Joint Count (TAJC)"
+  ) +
+  theme_minimal()
+
+# Scatter plot of BSGcalc (ESR) and TAJC
+ggplot(data, aes(x = BSGcalc, y = TAJC)) +
+  geom_point(color = "purple", alpha = 0.7, size = 3) +  # Scatter points
+  geom_smooth(method = "lm", color = "red", se = TRUE) +  # Add linear regression line
+  labs(
+    title = "Scatter Plot of BSGcalc (ESR) vs Total Active Joint Count (TAJC)",
+    x = "BSGcalc (ESR)",
+    y = "Total Active Joint Count (TAJC)"
+  ) +
+  theme_minimal()
+
+# Scatter plot of Ferritin (ESR) and TAJC
+ggplot(data, aes(x = Ferritin, y = TAJC)) +
+  geom_point(color = "purple", alpha = 0.7, size = 3) +  # Scatter points
+  geom_smooth(method = "lm", color = "red", se = TRUE) +  # Add linear regression line
+  labs(
+    title = "Scatter Plot of Ferritin vs Total Active Joint Count (TAJC)",
+    x = "Ferritin",
+    y = "Total Active Joint Count (TAJC)"
+  ) +
+  theme_minimal()
+
+
+```
+
+# Interpretations (Table)
+
+```{r}
+model_summary <- summary(mod_negbinom)
+
+coefficients <- model_summary$coefficients$cond[, "Estimate"]
+std_errors <- model_summary$coefficients$cond[, "Std. Error"]
+p_values <- model_summary$coefficients$cond[, "Pr(>|z|)"]
+
+# Remove NA values to match row count
+valid_indices <- !is.na(coefficients) & !is.na(std_errors) & !is.na(p_values)
+coefficients <- coefficients[valid_indices]
+std_errors <- std_errors[valid_indices]
+p_values <- p_values[valid_indices]
+
+IRR <- exp(coefficients)
+lower_CI <- exp(coefficients - 1.96 * std_errors)
+upper_CI <- exp(coefficients + 1.96 * std_errors)
+
+
+IRR_table <- data.frame(
+  Predictor = names(coefficients),
+  Estimate = coefficients,
+  IRR = IRR,
+  Lower_CI = lower_CI,
+  Upper_CI = upper_CI,
+  p_value = p_values
+  )
+
+print(IRR_table)
+```
