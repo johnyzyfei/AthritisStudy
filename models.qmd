@@ -1,0 +1,1247 @@
+---
+title: "Analysis FInal"
+format: pdf
+editor: visual
+---
+
+# Libraries, data, variables and sparcity check
+
+```{r, warning=FALSE, message=FALSE}
+library(readxl)     
+library(dplyr)      
+library(glmmTMB)    
+library(caret)      
+library(ggplot2)    
+library(naniar)
+library(AER)
+library(performance)
+library(MASS)
+library(glmnet)
+library(plotmo)
+library(interactions)
+library(knitr)
+library(kableExtra)
+library(performance)
+library(sjPlot)
+
+library(gridExtra)
+library(grid)
+library(ggpubr)
+```
+
+```{r}
+data0 <- read_excel("ElSA Dataset 04 24.xlsx", sheet = "Datensatz 260324")
+
+missing_data <- colSums(is.na(data0)) / nrow(data0)
+print(missing_data)
+vis_miss(data0)  # missing data pattern plot
+data <- na.omit(data0)
+data <- data %>% filter(Ferritin < 1000)
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Convert categorical variables to factors 
+data$Gender <- as.factor(data$Gender)
+data$AIDAI <- as.factor(data$AIDAI)
+data$AIDAIsys <- as.factor(data$AIDAIsys)
+data$GABiID <- as.factor(data$GABiID)
+
+# Otherwise numeric
+data$AgeDiag <- as.numeric(data$AgeDiag) # age diagnosed
+data$AgeSample <- as.numeric(data$AgeSample) # time of sample
+data$VASphys <- as.numeric(data$VASphys) 
+data$VASpat <- as.numeric(data$VASpat)
+data$JLM <- as.numeric(data$JLM)
+data$CHAQ <- as.numeric(data$CHAQ)
+data$JADAS27jc <- as.numeric(data$JADAS27jc)
+data$CRP <- as.numeric(data$CRP)
+data$BSGcalc <- as.numeric(data$BSGcalc)
+data$Ferritin <- as.numeric(data$Ferritin)
+data$`Gesamt-Eiweiß (g/dl)` <- as.numeric(data$`Gesamt-Eiweiß (g/dl)`)
+data$`a2-Globulin (%)` <- as.numeric(data$`a2-Globulin (%)`)
+data$CA2F <- as.numeric(data$CA2F)
+data$Haptoglobin <- as.numeric(data$Haptoglobin)
+```
+
+```{r}
+check_sparsity_table <- function(data) {
+  # Select categorical variables (factors)
+  categorical_vars <- data %>% select_if(is.factor)
+  
+  # Compute frequency and proportion for each categorical variable
+  sparsity_table <- categorical_vars %>%
+    tidyr::pivot_longer(cols = everything(), names_to = "Variable", values_to = "Level") %>%
+    count(Variable, Level, name = "Frequency") %>%
+    group_by(Variable) %>%
+    mutate(Proportion = round(Frequency / sum(Frequency), 3)) %>%
+    ungroup()
+  
+  return(sparsity_table)
+}
+
+sparsity_table <- check_sparsity_table(data)
+print(sparsity_table)
+
+
+ggplot(sparsity_table, aes(x = reorder(Level, -Frequency), y = Frequency, fill = Variable)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  facet_wrap(~ Variable, scales = "free", ncol = 2) +  # Adjust the number of columns for better layout
+  labs(title = "Frequency Distribution of Categorical Variables",
+       x = "Levels",
+       y = "Frequency",
+       fill = "Variable") +
+  theme_minimal(base_size = 14) +  # Increase base font size
+  theme(axis.text.x = element_text(size = 12, angle = 45, hjust = 1), 
+        axis.text.y = element_text(size = 12),
+        strip.text = element_text(size = 14, face = "bold")) +  # Make facet labels bold
+  coord_flip()  # Flip bars for better readability
+```
+
+```{r}
+# Create Woo categorical variable
+data <- data %>%
+  mutate(Woo_group = case_when(
+    Woo %in% c(0) ~ "Low",
+    Woo > 0 ~ "High"
+  ))
+
+data$Woo_group <- factor(data$Woo_group, levels = c("Low", "High"))
+table(data$Woo_group)
+
+
+# Rescaling by factor of 10
+data <- data %>%
+  mutate(Haptoglobin = Haptoglobin / 10)
+
+data <- data %>%
+  mutate(BSGcalc = BSGcalc / 10)
+
+data <- data %>%
+  mutate(Ferritin = Ferritin / 10)
+```
+
+# Model Fitting
+
+```{r}
+# Crude Model
+crude <- glmmTMB(
+  TAJC ~Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(crude)
+
+# Extract coefficient and standard error for Woo_groupHigh
+coef_Woo <- summary(crude)$coefficients$cond["Woo_groupHigh", "Estimate"]
+se_Woo <- summary(crude)$coefficients$cond["Woo_groupHigh", "Std. Error"]
+
+# Calculate 95% CI on log scale
+lower_Woo <- coef_Woo - 1.96 * se_Woo
+upper_Woo <- coef_Woo + 1.96 * se_Woo
+
+# Exponentiate
+exp_coef_Woo <- exp(coef_Woo)
+exp_lower_Woo <- exp(lower_Woo)
+exp_upper_Woo <- exp(upper_Woo)
+
+# Output
+cat("Woo_groupHigh\n")
+cat("Exponentiated Estimate (IRR):", round(exp_coef_Woo, 4), "\n")
+cat("95% CI: (", round(exp_lower_Woo, 4), ",", round(exp_upper_Woo, 4), ")\n")
+
+```
+
+##1 Univariable Models (TAJC as outcome, and in this order: 1. BSG, 2. CRP, 3. Ferritin, 4. Haptoglobin)
+
+```{r}
+# Univariable model: BSG
+bsg_uni <- glmmTMB(
+  TAJC ~ BSGcalc + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(bsg_uni)
+
+coef_bsg <- summary(bsg_uni)$coefficients$cond["BSGcalc", "Estimate"]
+se_bsg <- summary(bsg_uni)$coefficients$cond["BSGcalc", "Std. Error"]
+
+lower_bsg <- coef_bsg - 1.96 * se_bsg
+upper_bsg <- coef_bsg + 1.96 * se_bsg
+
+# Exponentiate
+exp_coef_bsg <- exp(coef_bsg)
+exp_lower_bsg <- exp(lower_bsg)
+exp_upper_bsg <- exp(upper_bsg)
+
+cat("Exponentiated Estimate:", exp_coef_bsg, "\n")
+cat("95% CI: (", exp_lower_bsg, ",", exp_upper_bsg, ")\n")
+
+
+tab_model(
+  bsg_uni,  # your model object
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "Total Active Joint Count (TAJC)",
+  pred.labels = c("BSGcalc" = "BSG")
+)
+```
+
+```{r}
+# Univariable model: CRP
+crp_uni <- glmmTMB(
+  TAJC ~ CRP + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(crp_uni)
+
+coef_crp <- summary(crp_uni)$coefficients$cond["CRP", "Estimate"]
+se_crp <- summary(crp_uni)$coefficients$cond["CRP", "Std. Error"]
+
+lower_crp <- coef_crp - 1.96 * se_crp
+upper_crp <- coef_crp + 1.96 * se_crp
+
+exp_coef_crp <- exp(coef_crp)
+exp_lower_crp <- exp(lower_crp)
+exp_upper_crp <- exp(upper_crp)
+
+cat("CRP\n")
+cat("Exponentiated Estimate:", exp_coef_crp, "\n")
+cat("95% CI: (", exp_lower_crp, ",", exp_upper_crp, ")\n\n")
+
+tab_model(
+  crp_uni,  
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "TAJC ~ CRP Univariable Model",
+  pred.labels = c("CRP" = "CRP")
+)
+```
+
+```{r}
+# Univariable model: Ferritin
+fer_uni <- glmmTMB(
+  TAJC ~ Ferritin + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(fer_uni)
+
+coef_fer <- summary(fer_uni)$coefficients$cond["Ferritin", "Estimate"]
+se_fer <- summary(fer_uni)$coefficients$cond["Ferritin", "Std. Error"]
+
+lower_fer <- coef_fer - 1.96 * se_fer
+upper_fer <- coef_fer + 1.96 * se_fer
+
+exp_coef_fer <- exp(coef_fer)
+exp_lower_fer <- exp(lower_fer)
+exp_upper_fer <- exp(upper_fer)
+
+cat("Ferritin\n")
+cat("Exponentiated Estimate:", exp_coef_fer, "\n")
+cat("95% CI: (", exp_lower_fer, ",", exp_upper_fer, ")\n\n")
+
+tab_model(
+  fer_uni,
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  dv.labels = "TAJC ~ Ferritin Univariable Model",
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp"
+)
+
+```
+
+```{r}
+# Univariable model: Haptoglobin
+hapto_uni <- glmmTMB(
+  TAJC ~ Haptoglobin + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(hapto_uni)
+
+coef_hapto <- summary(hapto_uni)$coefficients$cond["Haptoglobin", "Estimate"]
+se_hapto <- summary(hapto_uni)$coefficients$cond["Haptoglobin", "Std. Error"]
+
+lower_hapto <- coef_hapto - 1.96 * se_hapto
+upper_hapto <- coef_hapto + 1.96 * se_hapto
+
+exp_coef_hapto <- exp(coef_hapto)
+exp_lower_hapto <- exp(lower_hapto)
+exp_upper_hapto <- exp(upper_hapto)
+
+cat("Haptoglobin\n")
+cat("Exponentiated Estimate:", exp_coef_hapto, "\n")
+cat("95% CI: (", exp_lower_hapto, ",", exp_upper_hapto, ")\n\n")
+
+tab_model(
+  hapto_uni,
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  dv.labels = "TAJC ~ Haptoglobin Univariable Model",
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp"
+)
+```
+
+##2 Modelled interactions with the Woo group along with the slopes graphs (TAJC as outcome, and in this order: 1. BSG+Woo, 2. CRP+Woo, 3. Ferritin+Woo, 4. Haptoglobin+Woo)
+
+```{r, warning=FALSE}
+# Step 1: Create fixed effects table with exponentiated estimates and CI
+bsg_tabmodel_like <- data.frame(
+  Predictor = c("BSGcalc (Low Woo group)", "BSGcalc (High Woo group)"),
+  IRR = c(round(exp_coef_BSG, 3), round(exp_coef_high, 3)),
+  `95% CI` = c(
+    paste0("[", round(exp_lower_BSG, 3), ", ", round(exp_upper_BSG, 3), "]"),
+    paste0("[", round(exp_lower_high, 3), ", ", round(exp_upper_high, 3), "]")
+  ),
+  `p-value` = c(
+    format.pval(2 * (1 - pnorm(abs(coef_BSG / se_BSG))), digits = 3),
+    format.pval(2 * (1 - pnorm(abs(coef_high / se_high))), digits = 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Step 2: Add section header for fixed effects
+bsg_labeled <- rbind(
+  data.frame(Predictor = "Fixed Effects", IRR = NA, `95% CI` = NA, `p-value` = NA),
+  bsg_tabmodel_like
+)
+
+# Step 3: Random effects and diagnostics section (already provided)
+rand_expanded <- data.frame(
+  Predictor = c(
+    "Random Effects & Model Diagnostics",
+    "Group (Random Intercept)",
+    "Standard Deviation (GABiID)",
+    "Number of Observations",
+    "Number of Groups (GABiID)",
+    "AIC"
+  ),
+  IRR = c(NA, "GABiID (Intercept)", "1.949", "143", "43", "493.73"),
+  `95% CI` = NA,
+  `p-value` = NA,
+  stringsAsFactors = FALSE
+)
+
+# Step 4: Combine and clean
+combined_table <- rbind(bsg_labeled, rand_expanded)
+combined_table[] <- lapply(combined_table, function(col) {
+  ifelse(is.na(col), "\u22C5", col)  # Replace NA with ⋅
+})
+
+# Step 5: Render table
+library(kableExtra)
+kable(combined_table, format = "html", align = "lccc", col.names = c("Predictor", "IRR", "95% CI", "p-value")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed")) %>%
+  column_spec(1, bold = combined_table$Predictor %in% c("Fixed Effects", "Random Effects & Model Diagnostics"))
+
+```
+
+```{r, warning=FALSE}
+mod_negbinom_crp <- glmmTMB(
+  TAJC ~ CRP * Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(mod_negbinom_crp)
+
+# Simple slopes and interaction plot
+sim_slopes(mod_negbinom_crp, pred = CRP, modx = Woo_group)
+interact_plot(mod_negbinom_crp, pred = CRP, modx = Woo_group, plot.points = TRUE)
+
+# Get variance-covariance matrix of fixed effects
+vcov_mat_crp <- vcov(mod_negbinom_crp)$cond
+
+# Extract estimates
+coef_crp <- summary(mod_negbinom_crp)$coefficients$cond["CRP", "Estimate"]
+se_crp <- summary(mod_negbinom_crp)$coefficients$cond["CRP", "Std. Error"]
+
+coef_interaction_crp <- summary(mod_negbinom_crp)$coefficients$cond["CRP:Woo_groupHigh", "Estimate"]
+se_interaction_crp <- summary(mod_negbinom_crp)$coefficients$cond["CRP:Woo_groupHigh", "Std. Error"]
+
+# --- Woo_group = Low (CRP only) ---
+lower_crp <- coef_crp - 1.96 * se_crp
+upper_crp <- coef_crp + 1.96 * se_crp
+
+exp_coef_crp <- exp(coef_crp)
+exp_lower_crp <- exp(lower_crp)
+exp_upper_crp <- exp(upper_crp)
+
+# --- Woo_group = High (CRP + Interaction) ---
+# Exact variance calculation
+var_crp <- vcov_mat_crp["CRP", "CRP"]
+var_interaction_crp <- vcov_mat_crp["CRP:Woo_groupHigh", "CRP:Woo_groupHigh"]
+covar_crp_interaction <- vcov_mat_crp["CRP", "CRP:Woo_groupHigh"]
+
+var_high_crp <- var_crp + var_interaction_crp + 2 * covar_crp_interaction
+se_high_crp <- sqrt(var_high_crp)
+
+coef_high_crp <- coef_crp + coef_interaction_crp
+
+lower_high_crp <- coef_high_crp - 1.96 * se_high_crp
+upper_high_crp <- coef_high_crp + 1.96 * se_high_crp
+
+exp_coef_high_crp <- exp(coef_high_crp)
+exp_lower_high_crp <- exp(lower_high_crp)
+exp_upper_high_crp <- exp(upper_high_crp)
+
+cat("Woo_group = Low (reference)\n")
+cat("Exponentiated Estimate:", round(exp_coef_crp, 4), "\n")
+cat("95% CI: (", round(exp_lower_crp, 4), ",", round(exp_upper_crp, 4), ")\n\n")
+
+cat("Woo_group = High\n")
+cat("Exponentiated Estimate:", round(exp_coef_high_crp, 4), "\n")
+cat("95% CI: (", round(exp_lower_high_crp, 4), ",", round(exp_upper_high_crp, 4), ")\n")
+
+
+# Step 1: Fixed effects table for CRP (from your calculated values)
+crp_tabmodel_like <- data.frame(
+  Predictor = c("CRP (Low Woo group)", "CRP (High Woo group)"),
+  IRR = c(round(exp_coef_crp, 3), round(exp_coef_high_crp, 3)),
+  `95% CI` = c(
+    paste0("[", round(exp_lower_crp, 3), ", ", round(exp_upper_crp, 3), "]"),
+    paste0("[", round(exp_lower_high_crp, 3), ", ", round(exp_upper_high_crp, 3), "]")
+  ),
+  `p-value` = c(
+    format.pval(2 * (1 - pnorm(abs(coef_crp / se_crp))), digits = 3),
+    format.pval(2 * (1 - pnorm(abs(coef_high_crp / se_high_crp))), digits = 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Step 2: Add section label row
+crp_labeled <- rbind(
+  data.frame(Predictor = "Fixed Effects", IRR = NA, `95% CI` = NA, `p-value` = NA),
+  crp_tabmodel_like
+)
+
+# Step 3: Add Random Effects & Diagnostics section (update values from mod_negbinom_crp)
+crp_rand_expanded <- data.frame(
+  Predictor = c(
+    "Random Effects & Model Diagnostics",
+    "Group (Random Intercept)",
+    "Standard Deviation (GABiID)",
+    "Number of Observations",
+    "Number of Groups (GABiID)",
+    "AIC"
+  ),
+  IRR = c(NA, "GABiID (Intercept)", "1.784", "143", "43", "503.8"),
+  `95% CI` = NA,
+  `p-value` = NA,
+  stringsAsFactors = FALSE
+)
+
+# Step 4: Combine and replace NA with ⋅
+crp_combined <- rbind(crp_labeled, crp_rand_expanded)
+crp_combined[] <- lapply(crp_combined, function(col) {
+  ifelse(is.na(col), "\u22C5", col)  # Unicode for ⋅
+})
+
+# Step 5: Display the final table
+kable(crp_combined, format = "html", align = "lccc", col.names = c("Predictor", "IRR", "95% CI", "p-value")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed")) %>%
+  column_spec(1, bold = crp_combined$Predictor %in% c("Fixed Effects", "Random Effects & Model Diagnostics"))
+
+```
+
+```{r, warning=FALSE}
+mod_negbinom_Ferritin <- glmmTMB(
+  TAJC ~ Ferritin * Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(mod_negbinom_Ferritin)
+
+# Simple slopes and interaction plot
+sim_slopes(mod_negbinom_Ferritin, pred = Ferritin, modx = Woo_group)
+interact_plot(mod_negbinom_Ferritin, pred = Ferritin, modx = Woo_group, plot.points = TRUE)
+
+# Get variance-covariance matrix of fixed effects
+vcov_mat_ferritin <- vcov(mod_negbinom_Ferritin)$cond
+
+# Extract estimates
+coef_ferritin <- summary(mod_negbinom_Ferritin)$coefficients$cond["Ferritin", "Estimate"]
+se_ferritin <- summary(mod_negbinom_Ferritin)$coefficients$cond["Ferritin", "Std. Error"]
+
+coef_interaction_ferritin <- summary(mod_negbinom_Ferritin)$coefficients$cond["Ferritin:Woo_groupHigh", "Estimate"]
+se_interaction_ferritin <- summary(mod_negbinom_Ferritin)$coefficients$cond["Ferritin:Woo_groupHigh", "Std. Error"]
+
+# --- Woo_group = Low (Ferritin only) ---
+lower_ferritin <- coef_ferritin - 1.96 * se_ferritin
+upper_ferritin <- coef_ferritin + 1.96 * se_ferritin
+
+exp_coef_ferritin <- exp(coef_ferritin)
+exp_lower_ferritin <- exp(lower_ferritin)
+exp_upper_ferritin <- exp(upper_ferritin)
+
+# --- Woo_group = High (Ferritin + Interaction) ---
+# Exact variance calculation
+var_ferritin <- vcov_mat_ferritin["Ferritin", "Ferritin"]
+var_interaction_ferritin <- vcov_mat_ferritin["Ferritin:Woo_groupHigh", "Ferritin:Woo_groupHigh"]
+covar_ferritin_interaction <- vcov_mat_ferritin["Ferritin", "Ferritin:Woo_groupHigh"]
+
+var_high_ferritin <- var_ferritin + var_interaction_ferritin + 2 * covar_ferritin_interaction
+se_high_ferritin <- sqrt(var_high_ferritin)
+
+coef_high_ferritin <- coef_ferritin + coef_interaction_ferritin
+
+lower_high_ferritin <- coef_high_ferritin - 1.96 * se_high_ferritin
+upper_high_ferritin <- coef_high_ferritin + 1.96 * se_high_ferritin
+
+exp_coef_high_ferritin <- exp(coef_high_ferritin)
+exp_lower_high_ferritin <- exp(lower_high_ferritin)
+exp_upper_high_ferritin <- exp(upper_high_ferritin)
+
+cat("Woo_group = Low (reference)\n")
+cat("Exponentiated Estimate:", round(exp_coef_ferritin, 4), "\n")
+cat("95% CI: (", round(exp_lower_ferritin, 4), ",", round(exp_upper_ferritin, 4), ")\n\n")
+
+cat("Woo_group = High\n")
+cat("Exponentiated Estimate:", round(exp_coef_high_ferritin, 4), "\n")
+cat("95% CI: (", round(exp_lower_high_ferritin, 4), ",", round(exp_upper_high_ferritin, 4), ")\n")
+
+# Step 1: Fixed effects table
+ferritin_tabmodel_like <- data.frame(
+  Predictor = c("Ferritin (Low Woo group)", "Ferritin (High Woo group)"),
+  IRR = c(round(exp_coef_ferritin, 3), round(exp_coef_high_ferritin, 3)),
+  `95% CI` = c(
+    paste0("[", round(exp_lower_ferritin, 3), ", ", round(exp_upper_ferritin, 3), "]"),
+    paste0("[", round(exp_lower_high_ferritin, 3), ", ", round(exp_upper_high_ferritin, 3), "]")
+  ),
+  `p-value` = c(
+    format.pval(2 * (1 - pnorm(abs(coef_ferritin / se_ferritin))), digits = 3),
+    format.pval(2 * (1 - pnorm(abs(coef_high_ferritin / se_high_ferritin))), digits = 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Step 2: Label section
+ferritin_labeled <- rbind(
+  data.frame(Predictor = "Fixed Effects", IRR = NA, `95% CI` = NA, `p-value` = NA),
+  ferritin_tabmodel_like
+)
+
+# Step 3: Random effects & diagnostics (you can update AIC or SD values if needed)
+ferritin_rand_expanded <- data.frame(
+  Predictor = c(
+    "Random Effects & Model Diagnostics",
+    "Group (Random Intercept)",
+    "Standard Deviation (GABiID)",
+    "Number of Observations",
+    "Number of Groups (GABiID)",
+    "AIC"
+  ),
+  IRR = c(NA, "GABiID (Intercept)", "1.980", "143", "43", "505.1"),
+  `95% CI` = NA,
+  `p-value` = NA,
+  stringsAsFactors = FALSE
+)
+
+# Step 4: Combine + replace NA with ⋅
+ferritin_combined <- rbind(ferritin_labeled, ferritin_rand_expanded)
+ferritin_combined[] <- lapply(ferritin_combined, function(col) {
+  ifelse(is.na(col), "\u22C5", col)  # ⋅
+})
+
+# Step 5: Render
+kable(ferritin_combined, format = "html", align = "lccc", col.names = c("Predictor", "IRR", "95% CI", "p-value")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed")) %>%
+  column_spec(1, bold = ferritin_combined$Predictor %in% c("Fixed Effects", "Random Effects & Model Diagnostics"))
+```
+
+```{r, warning=FALSE}
+mod_negbinom_Haptoglobin <- glmmTMB(
+  TAJC ~ Haptoglobin * Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(mod_negbinom_Haptoglobin)
+
+# Simple slopes and interaction plot
+sim_slopes(mod_negbinom_Haptoglobin, pred = Haptoglobin, modx = Woo_group)
+interact_plot(mod_negbinom_Haptoglobin, pred = Haptoglobin, modx = Woo_group, plot.points = TRUE)
+
+# Get variance-covariance matrix of fixed effects
+vcov_mat_haptoglobin <- vcov(mod_negbinom_Haptoglobin)$cond
+
+# Extract estimates
+coef_haptoglobin <- summary(mod_negbinom_Haptoglobin)$coefficients$cond["Haptoglobin", "Estimate"]
+se_haptoglobin <- summary(mod_negbinom_Haptoglobin)$coefficients$cond["Haptoglobin", "Std. Error"]
+
+coef_interaction_haptoglobin <- summary(mod_negbinom_Haptoglobin)$coefficients$cond["Haptoglobin:Woo_groupHigh", "Estimate"]
+se_interaction_haptoglobin <- summary(mod_negbinom_Haptoglobin)$coefficients$cond["Haptoglobin:Woo_groupHigh", "Std. Error"]
+
+# --- Woo_group = Low (Haptoglobin only) ---
+lower_haptoglobin <- coef_haptoglobin - 1.96 * se_haptoglobin
+upper_haptoglobin <- coef_haptoglobin + 1.96 * se_haptoglobin
+
+exp_coef_haptoglobin <- exp(coef_haptoglobin)
+exp_lower_haptoglobin <- exp(lower_haptoglobin)
+exp_upper_haptoglobin <- exp(upper_haptoglobin)
+
+# --- Woo_group = High (Haptoglobin + Interaction) ---
+# Exact variance calculation
+var_haptoglobin <- vcov_mat_haptoglobin["Haptoglobin", "Haptoglobin"]
+var_interaction_haptoglobin <- vcov_mat_haptoglobin["Haptoglobin:Woo_groupHigh", "Haptoglobin:Woo_groupHigh"]
+covar_haptoglobin_interaction <- vcov_mat_haptoglobin["Haptoglobin", "Haptoglobin:Woo_groupHigh"]
+
+var_high_haptoglobin <- var_haptoglobin + var_interaction_haptoglobin + 2 * covar_haptoglobin_interaction
+se_high_haptoglobin <- sqrt(var_high_haptoglobin)
+
+coef_high_haptoglobin <- coef_haptoglobin + coef_interaction_haptoglobin
+
+lower_high_haptoglobin <- coef_high_haptoglobin - 1.96 * se_high_haptoglobin
+upper_high_haptoglobin <- coef_high_haptoglobin + 1.96 * se_high_haptoglobin
+
+exp_coef_high_haptoglobin <- exp(coef_high_haptoglobin)
+exp_lower_high_haptoglobin <- exp(lower_high_haptoglobin)
+exp_upper_high_haptoglobin <- exp(upper_high_haptoglobin)
+
+cat("Woo_group = Low (reference)\n")
+cat("Exponentiated Estimate:", round(exp_coef_haptoglobin, 4), "\n")
+cat("95% CI: (", round(exp_lower_haptoglobin, 4), ",", round(exp_upper_haptoglobin, 4), ")\n\n")
+
+cat("Woo_group = High\n")
+cat("Exponentiated Estimate:", round(exp_coef_high_haptoglobin, 4), "\n")
+cat("95% CI: (", round(exp_lower_high_haptoglobin, 4), ",", round(exp_upper_high_haptoglobin, 4), ")\n")
+
+# Step 1: Fixed effects table
+haptoglobin_tabmodel_like <- data.frame(
+  Predictor = c("Haptoglobin (Low Woo group)", "Haptoglobin (High Woo group)"),
+  IRR = c(round(exp_coef_haptoglobin, 3), round(exp_coef_high_haptoglobin, 3)),
+  `95% CI` = c(
+    paste0("[", round(exp_lower_haptoglobin, 3), ", ", round(exp_upper_haptoglobin, 3), "]"),
+    paste0("[", round(exp_lower_high_haptoglobin, 3), ", ", round(exp_upper_high_haptoglobin, 3), "]")
+  ),
+  `p-value` = c(
+    format.pval(2 * (1 - pnorm(abs(coef_haptoglobin / se_haptoglobin))), digits = 3),
+    format.pval(2 * (1 - pnorm(abs(coef_high_haptoglobin / se_high_haptoglobin))), digits = 3)
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Step 2: Add section label row
+haptoglobin_labeled <- rbind(
+  data.frame(Predictor = "Fixed Effects", IRR = NA, `95% CI` = NA, `p-value` = NA),
+  haptoglobin_tabmodel_like
+)
+
+# Step 3: Add Random Effects & Diagnostics (you can update values here if needed)
+haptoglobin_rand_expanded <- data.frame(
+  Predictor = c(
+    "Random Effects & Model Diagnostics",
+    "Group (Random Intercept)",
+    "Standard Deviation (GABiID)",
+    "Number of Observations",
+    "Number of Groups (GABiID)",
+    "AIC"
+  ),
+  IRR = c(NA, "GABiID (Intercept)", "1.970", "143", "43", "506.2"),
+  `95% CI` = NA,
+  `p-value` = NA,
+  stringsAsFactors = FALSE
+)
+
+# Step 4: Combine + replace NA with ⋅
+haptoglobin_combined <- rbind(haptoglobin_labeled, haptoglobin_rand_expanded)
+haptoglobin_combined[] <- lapply(haptoglobin_combined, function(col) {
+  ifelse(is.na(col), "\u22C5", col)  # ⋅
+})
+
+# Step 5: Render the final combined table
+kable(haptoglobin_combined, format = "html", align = "lccc", col.names = c("Predictor", "IRR", "95% CI", "p-value")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed")) %>%
+  column_spec(1, bold = haptoglobin_combined$Predictor %in% c("Fixed Effects", "Random Effects & Model Diagnostics"))
+```
+
+##3 Final Model: CRP is interaction #hapto is confounder #BSG is interaction #Fer is interaction
+
+```{r final model}
+mod_negbinom_sat <- glmmTMB(
+  TAJC ~ (CRP + BSGcalc + Ferritin) * Woo_group + Haptoglobin + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(mod_negbinom_sat)
+confint(mod_negbinom_sat, level = 0.95)
+
+tab_model(
+  mod_negbinom_sat,
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "Total Active Joint Count (TAJC)",
+  pred.labels = c(
+    "CRP" = "CRP",
+    "BSGcalc" = "BSGcalc",
+    "Ferritin" = "Ferritin",
+    "Haptoglobin" = "Haptoglobin",
+    "Woo_groupHigh" = "High Woo",
+    "CRP:Woo_groupHigh" = "CRP × High Woo",
+    "BSGcalc:Woo_groupHigh" = "BSGcalc × High Woo",
+    "Ferritin:Woo_groupHigh" = "Ferritin × High Woo"
+  )
+)
+
+```
+
+##4 Stepwise model to generate predictive model with TAJC as outcome and BSG, CRP, Ferritin and Haptoglobin as predictors.
+
+```{r}
+mod_full <- glmmTMB(
+  TAJC ~ BSGcalc + CRP + Ferritin + Haptoglobin + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+#summary(mod_full)
+
+# Fit GLM without random effect for stepwise selection, forcefully removing ferritin
+mod_glm_full <- glmmTMB(
+  TAJC ~ BSGcalc + CRP  + Haptoglobin,
+  family = poisson(link = "log"),  
+  data = data
+)
+
+# Stepwise selection using AIC
+mod_glm_step <- stepAIC(mod_glm_full, direction = "both")  # good 
+summary(mod_glm_step)
+
+# Checking VIF
+vif_vals <- check_collinearity(mod_glm_step)
+
+
+
+# --- Extract CRP ---
+coef_CRP <- summary(mod_glm_step)$coefficients$cond["CRP", "Estimate"]
+se_CRP   <- summary(mod_glm_step)$coefficients$cond["CRP", "Std. Error"]
+
+
+# Wald 95% CI on the log scale
+lower_CRP <- coef_CRP - 1.96 * se_CRP
+upper_CRP <- coef_CRP + 1.96 * se_CRP
+
+# Exponentiate to get IRR & CI
+exp_coef_CRP  <- exp(coef_CRP)
+exp_lower_CRP <- exp(lower_CRP)
+exp_upper_CRP <- exp(upper_CRP)
+
+
+# --- Extract Haptoglobin ---
+coef_hapto <- summary(mod_glm_step)$coefficients$cond["Haptoglobin", "Estimate"]
+se_hapto   <- summary(mod_glm_step)$coefficients$cond["Haptoglobin", "Std. Error"]
+
+lower_hapto <- coef_hapto - 1.96 * se_hapto
+upper_hapto <- coef_hapto + 1.96 * se_hapto
+
+exp_coef_hapto  <- exp(coef_hapto)
+exp_lower_hapto <- exp(lower_hapto)
+exp_upper_hapto <- exp(upper_hapto)
+
+# --- Print nicely ---
+cat("CRP\n")
+cat("  IRR: ", round(exp_coef_CRP, 4), "\n")
+cat("  95% CI: (", round(exp_lower_CRP, 4), ", ", round(exp_upper_CRP, 4), ")\n\n")
+
+cat("Haptoglobin\n")
+cat("  IRR: ", round(exp_coef_hapto, 4), "\n")
+cat("  95% CI: (", round(exp_lower_hapto, 4), ", ", round(exp_upper_hapto, 4), ")\n")
+
+print(vif_vals)
+
+
+
+
+tab_model(
+  mod_glm_step,
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "Total Active Joint Count (TAJC)",
+  pred.labels = c(
+    "CRP" = "CRP",
+    "Haptoglobin" = "Haptoglobin"
+  )
+)
+```
+
+Haptoglobin and CRP significant.VIF = 2.30 is moderate (\< 5).
+
+##5 Models with haptoglobin forced, do not include interactions in this model (TAJC as outcome, in this order: 1. BSG+Haptoglobin, 2. CRP+Haptoglobin, 3. Ferritin+Haptoglobin)
+
+```{r}
+mod_BSG_Hapto <- glmmTMB(
+  TAJC ~ BSGcalc + Haptoglobin + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(mod_BSG_Hapto)
+
+# Extract coefficients and standard errors
+coef_BSG <- summary(mod_BSG_Hapto)$coefficients$cond["BSGcalc", "Estimate"]
+se_BSG <- summary(mod_BSG_Hapto)$coefficients$cond["BSGcalc", "Std. Error"]
+
+coef_hapto <- summary(mod_BSG_Hapto)$coefficients$cond["Haptoglobin", "Estimate"]
+se_hapto <- summary(mod_BSG_Hapto)$coefficients$cond["Haptoglobin", "Std. Error"]
+
+# --- BSGcalc ---
+lower_BSG <- coef_BSG - 1.96 * se_BSG
+upper_BSG <- coef_BSG + 1.96 * se_BSG
+
+exp_coef_BSG <- exp(coef_BSG)
+exp_lower_BSG <- exp(lower_BSG)
+exp_upper_BSG <- exp(upper_BSG)
+
+# --- Haptoglobin ---
+lower_hapto <- coef_hapto - 1.96 * se_hapto
+upper_hapto <- coef_hapto + 1.96 * se_hapto
+
+exp_coef_hapto <- exp(coef_hapto)
+exp_lower_hapto <- exp(lower_hapto)
+exp_upper_hapto <- exp(upper_hapto)
+
+# --- Print nicely ---
+cat("BSGcalc\n")
+cat("Exponentiated Estimate (IRR):", round(exp_coef_BSG, 4), "\n")
+cat("95% CI: (", round(exp_lower_BSG, 4), ",", round(exp_upper_BSG, 4), ")\n\n")
+
+cat("Haptoglobin\n")
+cat("Exponentiated Estimate (IRR):", round(exp_coef_hapto, 4), "\n")
+cat("95% CI: (", round(exp_lower_hapto, 4), ",", round(exp_upper_hapto, 4), ")\n")
+
+
+
+
+tab_model(
+  mod_BSG_Hapto,
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "Total Active Joint Count (TAJC)",
+  pred.labels = c(
+    "BSGcalc" = "BSG",
+    "Haptoglobin" = "Haptoglobin"
+  )
+)
+```
+
+```{r}
+mod_CRP_Hapto <- glmmTMB(
+  TAJC ~ CRP + Haptoglobin + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(mod_CRP_Hapto)
+
+# Extract coefficients and standard errors
+coef_CRP <- summary(mod_CRP_Hapto)$coefficients$cond["CRP", "Estimate"]
+se_CRP <- summary(mod_CRP_Hapto)$coefficients$cond["CRP", "Std. Error"]
+
+coef_hapto <- summary(mod_CRP_Hapto)$coefficients$cond["Haptoglobin", "Estimate"]
+se_hapto <- summary(mod_CRP_Hapto)$coefficients$cond["Haptoglobin", "Std. Error"]
+
+# --- CRP ---
+lower_CRP <- coef_CRP - 1.96 * se_CRP
+upper_CRP <- coef_CRP + 1.96 * se_CRP
+
+exp_coef_CRP <- exp(coef_CRP)
+exp_lower_CRP <- exp(lower_CRP)
+exp_upper_CRP <- exp(upper_CRP)
+
+# --- Haptoglobin ---
+lower_hapto <- coef_hapto - 1.96 * se_hapto
+upper_hapto <- coef_hapto + 1.96 * se_hapto
+
+exp_coef_hapto <- exp(coef_hapto)
+exp_lower_hapto <- exp(lower_hapto)
+exp_upper_hapto <- exp(upper_hapto)
+
+# --- Print nicely ---
+cat("CRP\n")
+cat("Exponentiated Estimate (IRR):", round(exp_coef_CRP, 4), "\n")
+cat("95% CI: (", round(exp_lower_CRP, 4), ",", round(exp_upper_CRP, 4), ")\n\n")
+
+cat("Haptoglobin\n")
+cat("Exponentiated Estimate (IRR):", round(exp_coef_hapto, 4), "\n")
+cat("95% CI: (", round(exp_lower_hapto, 4), ",", round(exp_upper_hapto, 4), ")\n")
+
+tab_model(
+  mod_CRP_Hapto,
+  show.intercept = TRUE,      
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "Total Active Joint Count (TAJC)",
+  pred.labels = c(
+    "(Intercept)" = "Intercept",
+    "CRP" = "CRP",
+    "Haptoglobin" = "Haptoglobin"
+  )
+)
+```
+
+```{r}
+mod_Ferritin_Hapto <- glmmTMB(
+  TAJC ~ Ferritin + Haptoglobin + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+summary(mod_Ferritin_Hapto)
+
+# Extract coefficients and standard errors
+coef_Ferritin <- summary(mod_Ferritin_Hapto)$coefficients$cond["Ferritin", "Estimate"]
+se_Ferritin <- summary(mod_Ferritin_Hapto)$coefficients$cond["Ferritin", "Std. Error"]
+
+coef_hapto <- summary(mod_Ferritin_Hapto)$coefficients$cond["Haptoglobin", "Estimate"]
+se_hapto <- summary(mod_Ferritin_Hapto)$coefficients$cond["Haptoglobin", "Std. Error"]
+
+# --- Ferritin ---
+lower_Ferritin <- coef_Ferritin - 1.96 * se_Ferritin
+upper_Ferritin <- coef_Ferritin + 1.96 * se_Ferritin
+
+exp_coef_Ferritin <- exp(coef_Ferritin)
+exp_lower_Ferritin <- exp(lower_Ferritin)
+exp_upper_Ferritin <- exp(upper_Ferritin)
+
+# --- Haptoglobin ---
+lower_hapto <- coef_hapto - 1.96 * se_hapto
+upper_hapto <- coef_hapto + 1.96 * se_hapto
+
+exp_coef_hapto <- exp(coef_hapto)
+exp_lower_hapto <- exp(lower_hapto)
+exp_upper_hapto <- exp(upper_hapto)
+
+# --- Print nicely ---
+cat("Ferritin\n")
+cat("Exponentiated Estimate (IRR):", round(exp_coef_Ferritin, 4), "\n")
+cat("95% CI: (", round(exp_lower_Ferritin, 4), ",", round(exp_upper_Ferritin, 4), ")\n\n")
+
+cat("Haptoglobin\n")
+cat("Exponentiated Estimate (IRR):", round(exp_coef_hapto, 4), "\n")
+cat("95% CI: (", round(exp_lower_hapto, 4), ",", round(exp_upper_hapto, 4), ")\n")
+
+
+
+tab_model(
+  mod_Ferritin_Hapto,
+  show.intercept = TRUE,        # Show intercept
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "Total Active Joint Count (TAJC)",
+  pred.labels = c(
+    "(Intercept)" = "Intercept",
+    "Ferritin" = "Ferritin",
+    "Haptoglobin" = "Haptoglobin"
+  )
+)
+```
+
+## 6. Woo \* BSG, Woo \* CRP, Woo \* Ferritin
+
+```{r}
+mod_negbinom_BSG <- glmmTMB(
+  TAJC ~ BSGcalc * Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+
+tab_model(
+  mod_negbinom_BSG,
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "TAJC",
+  pred.labels = c(
+    "BSGcalc" = "BSGcalc",
+    "Woo_groupHigh" = "High Woo",
+    "BSGcalc:Woo_groupHigh" = "BSGcalc × High Woo"
+  )
+)
+
+summary(mod_negbinom_BSG)
+```
+
+```{r}
+mod_negbinom_CRP <- glmmTMB(
+  TAJC ~ CRP * Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+
+tab_model(
+  mod_negbinom_CRP,
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "TAJC",
+  pred.labels = c(
+    "CRP" = "CRP",
+    "Woo_groupHigh" = "High Woo",
+    "CRP:Woo_groupHigh" = "CRP × High Woo"
+  )
+)
+
+summary(mod_negbinom_CRP)
+```
+
+```{r}
+mod_negbinom_Ferritin <- glmmTMB(
+  TAJC ~ Ferritin * Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+
+tab_model(
+  mod_negbinom_Ferritin,
+  show.intercept = TRUE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "TAJC",
+  pred.labels = c(
+    "Ferritin" = "Ferritin",
+    "Woo_groupHigh" = "High Woo",
+    "Ferritin:Woo_groupHigh" = "Ferritin × High Woo"
+  )
+)
+
+summary(mod_negbinom_Ferritin)
+```
+
+## Distribution Check
+
+```{r}
+#check distribution of variables
+#outcome: TAJC
+#Exposures: CRP, Haptoglobin, BSGcalc, Ferritin
+
+# Calculate means and SDs
+mean_TAJC         <- mean(data$TAJC, na.rm = TRUE)
+sd_TAJC           <- sd(data$TAJC, na.rm = TRUE)
+mean_CRP          <- mean(data$CRP, na.rm = TRUE)
+sd_CRP            <- sd(data$CRP, na.rm = TRUE)
+mean_Haptoglobin  <- mean(data$Haptoglobin, na.rm = TRUE)
+sd_Haptoglobin    <- sd(data$Haptoglobin, na.rm = TRUE)
+mean_BSGcalc      <- mean(data$BSGcalc, na.rm = TRUE)
+sd_BSGcalc        <- sd(data$BSGcalc, na.rm = TRUE)
+mean_Ferritin     <- mean(data$Ferritin, na.rm = TRUE)
+sd_Ferritin       <- sd(data$Ferritin, na.rm = TRUE)
+
+# Calculate medians and IQRs for the exposures
+median_TAJC        <- median(data$TAJC, na.rm = TRUE)
+iqr_TAJC           <- sd(data$TAJC, na.rm = TRUE)
+median_CRP         <- median(data$CRP, na.rm = TRUE)
+iqr_CRP            <- IQR(data$CRP, na.rm = TRUE)
+median_Haptoglobin <- median(data$Haptoglobin, na.rm = TRUE)
+iqr_Haptoglobin    <- IQR(data$Haptoglobin, na.rm = TRUE)
+median_BSGcalc     <- median(data$BSGcalc, na.rm = TRUE)
+iqr_BSGcalc        <- IQR(data$BSGcalc, na.rm = TRUE)
+median_Ferritin    <- median(data$Ferritin, na.rm = TRUE)
+iqr_Ferritin       <- IQR(data$Ferritin, na.rm = TRUE)
+
+
+# Combine all variables into a single data frame for plotting
+combined_data <- data.frame(
+  TAJC        = data$TAJC,
+  CRP         = data$CRP,
+  Haptoglobin = data$Haptoglobin,
+  BSGcalc     = data$BSGcalc,
+  Ferritin    = data$Ferritin
+)
+
+# Create a combined box plot
+boxplot(combined_data,
+        main = "Box Plots of All Variables",
+        ylab = "Value",
+        col  = "lightblue")
+```
+
+```{r}
+# Print medians and IQRs of each biomarker within each Woo_group
+for (grp in unique(data$Woo_group)) {
+  # Subset the data for this group
+  sub <- data[data$Woo_group == grp, ]
+  
+  # Compute medians and IQRs
+  median_CRP         <- median(sub$CRP, na.rm = TRUE)
+  iqr_CRP            <- IQR(sub$CRP, na.rm = TRUE)
+  median_Haptoglobin <- median(sub$Haptoglobin, na.rm = TRUE)
+  iqr_Haptoglobin    <- IQR(sub$Haptoglobin, na.rm = TRUE)
+  median_BSGcalc     <- median(sub$BSGcalc, na.rm = TRUE)
+  iqr_BSGcalc        <- IQR(sub$BSGcalc, na.rm = TRUE)
+  median_Ferritin    <- median(sub$Ferritin, na.rm = TRUE)
+  iqr_Ferritin       <- IQR(sub$Ferritin, na.rm = TRUE)
+  
+  # Print results
+  cat("Woo_group:", grp, "\n")
+  cat("  CRP: Median =", median_CRP, ", IQR =", iqr_CRP, "\n")
+  cat("  Haptoglobin: Median =", median_Haptoglobin, ", IQR =", iqr_Haptoglobin, "\n")
+  cat("  BSGcalc: Median =", median_BSGcalc, ", IQR =", iqr_BSGcalc, "\n")
+  cat("  Ferritin: Median =", median_Ferritin, ", IQR =", iqr_Ferritin, "\n\n")
+}
+
+
+# Report the results
+cat("TAJC: Mean =", mean_TAJC, ", SD =", sd_TAJC, 
+    " | Median =", median_TAJC, ", IQR =", iqr_TAJC, "\n")
+cat("CRP: Mean =", mean_CRP, ", SD =", sd_CRP, 
+    " | Median =", median_CRP, ", IQR =", iqr_CRP, "\n")
+cat("Haptoglobin: Mean =", mean_Haptoglobin, ", SD =", sd_Haptoglobin, 
+    " | Median =", median_Haptoglobin, ", IQR =", iqr_Haptoglobin, "\n")
+cat("BSGcalc: Mean =", mean_BSGcalc, ", SD =", sd_BSGcalc, 
+    " | Median =", median_BSGcalc, ", IQR =", iqr_BSGcalc, "\n")
+cat("Ferritin: Mean =", mean_Ferritin, ", SD =", sd_Ferritin, 
+    " | Median =", median_Ferritin, ", IQR =", iqr_Ferritin, "\n")
+```
+
+```{r}
+finalmod1 <- glmmTMB(
+  TAJC ~ Haptoglobin + CRP + Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+
+summary(finalmod1)
+```
+
+```{r}
+tab_model(
+  finalmod1,
+  show.intercept = FALSE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "TAJC (Negative Binomial)",
+  pred.labels = c(
+    "Haptoglobin" = "Haptoglobin",
+    "CRP" = "C-Reactive Protein",
+    "Woo_group" = "Phenotype Group"
+  )
+)
+```
+
+```{r}
+finalmod2 <- glmmTMB(
+  TAJC ~ Haptoglobin* Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+
+summary(finalmod2)
+```
+
+```{r}
+tab_model(
+  finalmod2,
+  show.intercept = FALSE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "TAJC (Negative Binomial)",
+  pred.labels = c(
+    "Haptoglobin" = "Haptoglobin",
+    "Woo_group" = "Group",
+    "Haptoglobin:Woo_group" = "Haptoglobin × Group"
+  )
+)
+```
+
+```{r}
+finalmod3 <- glmmTMB(
+  TAJC ~ CRP* Woo_group + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+
+summary(finalmod3)
+```
+
+```{r}
+tab_model(
+  finalmod3,
+  show.intercept = FALSE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "TAJC (Negative Binomial)",
+  pred.labels = c(
+    "CRP" = "CRP",
+    "Woo_group" = "Group",
+    "CRP:Woo_group" = "CRP × Group"
+  )
+)
+```
+
+###### "show the two slopes with the interaction forced"
+
+```{r}
+finalmod4 <- glmmTMB(
+  TAJC ~ Haptoglobin + (Woo_group*CRP) + (1 | GABiID),
+  family = nbinom2,
+  data = data
+)
+
+summary(finalmod4)
+
+coefs <- summary(finalmod4)$coefficients$cond
+
+# Extract the relevant estimates
+beta_crp <- coefs["CRP", "Estimate"]
+beta_interaction <- coefs["Woo_groupHigh:CRP", "Estimate"]
+
+# Compute slopes
+slope_Low <- beta_crp
+slope_High <- beta_crp + beta_interaction
+
+slope_Low
+slope_High
+
+
+```
+
+```{r}
+tab_model(
+  finalmod4,
+  show.intercept = FALSE,
+  show.aic = TRUE,
+  show.ci = 0.95,
+  show.p = TRUE,
+  transform = "exp",
+  dv.labels = "TAJC (Negative Binomial)",
+  pred.labels = c(
+    "Haptoglobin" = "Haptoglobin",
+    "CRP" = "CRP",
+    "Woo_groupHigh" = "Woo High",
+    "Woo_groupHigh:CRP" = "CRP × High Group"
+  )
+)
+
+exp(slope_Low)
+exp(slope_High)
+```
